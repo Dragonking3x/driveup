@@ -11,20 +11,18 @@ fun main(args: Array<String>) {
         println("Google Drive Service is not available")
         return
     }
-    //if (args.size < 1) {
-    //    println("Usage: driveup <folder>")
-    //    return
-    //}
+    if (args.size < 1) {
+        println("Usage: driveup <folder>")
+        return
+    }
 
-    //val localFolderPath = args[0]
-    //val googleDriveFolder = args[1]
+    val localFolderPath = args[0]
+    val googleDriveFolder = args[1]
 
-    val localFolderPath = "/home/dragonking3x/Ubuntu_backup"
-    val googleDriveFolder = "/"
 
     val dataClass = loadDataClass()
 
-    val file = File(localFolderPath)
+    //val file = File(localFolderPath)
     /*
     val googleFileList: MutableList<GoogleFile> = mutableListOf()
     var pageToken: String? = null
@@ -63,7 +61,17 @@ fun main(args: Array<String>) {
     dataClass.googleFiles = googleFileList
     saveDataClass(dataClass)
 
-     */
+
+
+    val execute = googleDriveService
+        .files()
+        .list()
+        .setPageSize(1000)
+        .setQ("parents='${googleDriveFolder}' and trashed=false")
+        .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents)")
+        .execute()
+        */
+
     println()
     val fileBackup = FileBackup(dataClass, googleDriveService, localFolderPath, googleDriveFolder)
     fileBackup.firstPreparation()

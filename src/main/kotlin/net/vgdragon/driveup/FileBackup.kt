@@ -4,6 +4,7 @@ import com.google.api.services.drive.Drive
 import com.google.api.services.drive.model.File as GoogleFile
 import java.io.File
 import java.util.*
+import kotlin.concurrent.thread
 
 enum class FileBackupType {
     BY_MODIFIED_DATE
@@ -22,6 +23,15 @@ class FileBackup (val dataClass: DataClass,
                   val googleDriveService: Drive,
                   val backupFolder: File,
                   val googleDriveFolder: String = ""){
+
+    private val threadMap: MutableMap<Long, Thread> = mutableMapOf()
+    private val threadMapLock: Object = Object()
+    private val activeThreadsMap: MutableMap<Long, Thread> = mutableMapOf()
+    private val activeThreadsMapLock: Object = Object()
+
+    val maximalRunningThreads: Int = 4
+    private var currentActions = 0
+    private val currentActionsLock: Object = Object()
 
     fun startRoutine(timeBetweenBackups: Long = 1000 * 60 * 60 * 24 * 7,
                      backupType: FileBackupType = FileBackupType.BY_MODIFIED_DATE) {
@@ -88,6 +98,97 @@ class FileBackup (val dataClass: DataClass,
 
         }
     }
+
+    fun firstPreparation(){
+        var backupDataClass = dataClass.backupFolderMap[backupFolder.absolutePath]
+        if (backupDataClass == null) {
+            backupDataClass = BackUpDataClass(backupFolder.absolutePath, googleDriveFolder)
+            dataClass.backupFolderMap[backupFolder.absolutePath] = backupDataClass
+        }
+
+        val rootFileDataClass = FileDataClass(
+            "",
+            "",
+            "",
+            "application/vnd.google-apps.folder",
+            0L,
+            0L,
+            "",
+            "",
+            "",
+            true,
+            mutableListOf()
+        )
+        backupDataClass.googleFileDataClass = rootFileDataClass
+
+        println("----- Start Loading Google Drive Files Data -----")
+        println("Start Date: " + Date())
+
+        val startTime = System.currentTimeMillis()
+        val googleFileList: MutableList<GoogleFile> = getGoogleDriveFileList(googleDriveFolder)
+
+        println("----- Finished loading root folder-----")
+
+        loadFolderDataInClass(googleFileList, rootFileDataClass)
+        var finished = false
+        while (!finished) {
+
+            synchronized(threadMapLock) {
+                synchronized(activeThreadsMapLock) {
+                    if(activeThreadsMap.size < maximalRunningThreads && threadMap.isNotEmpty()) {
+                        val thread = threadMap.remove(threadMap.keys.first())
+
+                        activeThreadsMap[thread!!.id] = thread
+                        thread.start()
+                    }
+
+                    if (currentActions <= 0)
+                        finished = true
+                }
+            }
+            synchronized(currentActionsLock) {
+                println("Current Actions: $currentActions")
+            }
+            Thread.sleep(1000)
+        }
+        saveDataClass(dataClass)
+        println()
+
+    }
+
+    fun loadFolderDataInClass(srcGoogleFileList: MutableList<GoogleFile>,
+                              srcFileDataClass: FileDataClass) {
+        synchronized(currentActionsLock) {
+            currentActions++
+        }
+        val thread = Thread {
+            for (googleFile in srcGoogleFileList) {
+
+                val fileDataClass = convertGoogleFileToFileDataClass(googleFile)
+                srcFileDataClass.fileList.add(fileDataClass)
+
+                if (fileDataClass.isFolder) {
+
+                    val googleDriveFileList = getGoogleDriveFileList(googleFile.id)
+                    loadFolderDataInClass(googleDriveFileList, fileDataClass)
+                }
+            }
+            //println("Finished: " + srcFileDataClass.name)
+            synchronized(activeThreadsMapLock){
+                activeThreadsMap.remove(Thread.currentThread().id)
+            }
+            synchronized(currentActionsLock) {
+                currentActions--
+            }
+
+        }
+        synchronized(threadMapLock) {
+            threadMap.put(thread.id, thread)
+        }
+    }
+
+
+/*
 
     fun firstPreparation(){
         val googleFileList: MutableList<GoogleFile> = mutableListOf()
@@ -209,6 +310,44 @@ class FileBackup (val dataClass: DataClass,
             }
         }
         return googleFolderList[0]
+    }
+*/
+
+    fun getGoogleDriveFileList(parent: String): MutableList<GoogleFile> {
+        val googleFileList: MutableList<GoogleFile> = mutableListOf()
+        var pageToken: String? = null
+
+        do {
+            val execute = googleDriveService
+                .files()
+                .list()
+                .setPageSize(1000)
+                .setQ("parents='${parent}' and trashed=false")
+                .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents)")
+                .execute()
+
+            googleFileList.addAll(execute.files)
+            pageToken = execute.nextPageToken
+        } while (pageToken != null)
+
+        return googleFileList
+    }
+
+    fun convertGoogleFileToFileDataClass(googleFile: GoogleFile): FileDataClass{
+
+
+        return FileDataClass(googleFile.name ?: "",
+            googleFile.id ?: "",
+            if(googleFile.parents.isNullOrEmpty()) "" else googleFile.parents[0],
+            googleFile.mimeType ?: "",
+            googleFile.modifiedTime.value ?: 0L,
+            googleFile.createdTime.value ?: 0L,
+            googleFile.originalFilename ?: "",
+            googleFile.fileExtension ?: "",
+            googleFile.md5Checksum ?: "",
+            googleFile.mimeType == "application/vnd.google-apps.folder",
+            googleFile.parents ?: mutableListOf()
+        )
     }
 
     fun isNeedBackup(driveFile: GoogleFile,
