@@ -25,4 +25,20 @@ class FileDataClass(var name: String = "",
                     var md5Checksum: String = "",
                     var isFolder: Boolean = true,
                     var parents: MutableList<String> = mutableListOf(),
-                    var fileList: MutableList<FileDataClass> = mutableListOf())
+                    var fileList: MutableList<FileDataClass> = mutableListOf()){
+    fun copyWithoutList(): FileDataClass {
+        return FileDataClass(name,
+            id,
+            parentId,
+            mimeType,
+            lastModified,
+            createdTime,
+            originalFilename,
+            fileExtension,
+            md5Checksum,
+            isFolder,
+            parents,
+            mutableListOf()
+        )
+    }
+}

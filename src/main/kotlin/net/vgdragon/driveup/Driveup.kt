@@ -16,8 +16,8 @@ fun main(args: Array<String>) {
         return
     }
 
-    val localFolderPath = args[0]
-    val googleDriveFolder = args[1]
+    var localFolderPath = args[0]
+    var googleDriveFolder = args[1]
 
 
     val dataClass = loadDataClass()
@@ -61,16 +61,8 @@ fun main(args: Array<String>) {
     dataClass.googleFiles = googleFileList
     saveDataClass(dataClass)
 
+*/
 
-
-    val execute = googleDriveService
-        .files()
-        .list()
-        .setPageSize(1000)
-        .setQ("parents='${googleDriveFolder}' and trashed=false")
-        .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents)")
-        .execute()
-        */
 
     println()
     val fileBackup = FileBackup(dataClass, googleDriveService, localFolderPath, googleDriveFolder)
