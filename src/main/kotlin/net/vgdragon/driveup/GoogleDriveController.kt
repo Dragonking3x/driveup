@@ -75,7 +75,10 @@ class GoogleDriveController {
         val credential = getCredentials(HTTP_TRANSPORT)
 
         // 5: Create Google Drive Service.
-        return Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, credential).setApplicationName(APPLICATION_NAME).build()
+        val build = Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, credential)
+            .setApplicationName(APPLICATION_NAME)
+            .build()
 
+        return build
     }
 }
