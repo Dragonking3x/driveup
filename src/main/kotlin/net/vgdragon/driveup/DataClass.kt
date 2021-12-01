@@ -1,7 +1,5 @@
 package net.vgdragon.driveup
 
-import com.google.api.services.drive.model.File as GoogleFile
-import java.io.File
 
 class DataClass (var backupFolderMap: HashMap<String, BackUpDataClass> = HashMap())
 
@@ -12,7 +10,17 @@ class BackUpDataClass (var backupFolder: String = "",
                        var googleFileDataClass: FileDataClass = FileDataClass())
 
 
-
+enum class FileStatusType{
+    UP_TO_DATE,
+    LOCAL_NEWER,
+    GOOGLE_NEWER,
+    LOCAL_DELETED,
+    GOOGLE_DELETED,
+    LOCAL_NEW,
+    GOOGLE_NEW,
+    EQUAL,
+    NONE
+}
 
 class FileDataClass(var name: String = "",
                     var id: String = "",
@@ -25,7 +33,9 @@ class FileDataClass(var name: String = "",
                     var md5Checksum: String = "",
                     var isFolder: Boolean = true,
                     var parents: MutableList<String> = mutableListOf(),
+                    var fileStatusType: FileStatusType = FileStatusType.NONE,
                     var fileList: MutableList<FileDataClass> = mutableListOf()){
+
     fun copyWithoutList(): FileDataClass {
         return FileDataClass(name,
             id,
@@ -38,6 +48,7 @@ class FileDataClass(var name: String = "",
             md5Checksum,
             isFolder,
             parents,
+            fileStatusType,
             mutableListOf()
         )
     }

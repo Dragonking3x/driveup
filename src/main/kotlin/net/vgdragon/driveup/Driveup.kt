@@ -63,10 +63,17 @@ fun main(args: Array<String>) {
 
 */
 
+    val ignoringFileList: MutableList<String> = mutableListOf()
+    ignoringFileList.add("Thumbs.db")
+    ignoringFileList.add("desktop.ini")
+    ignoringFileList.add(".tmp.drivedownload")
+    ignoringFileList.add(".tmp.driveupload")
+    ignoringFileList.add("System Volume Information")
 
     println()
-    val fileBackup = FileBackup(dataClass, googleDriveService, localFolderPath, googleDriveFolder)
-    fileBackup.firstPreparation()
+    val fileBackup = FileBackup(dataClass, googleDriveService, localFolderPath, googleDriveFolder, ignoringFileList = ignoringFileList)
+
+    //fileBackup.firstPreparation()
     // 1 minute
     //fileBackup.startRoutine(60000, FileBackupType.BY_MODIFIED_DATE)
 

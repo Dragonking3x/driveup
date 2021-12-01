@@ -1,5 +1,7 @@
 package net.vgdragon.driveup
 
+import com.google.api.client.http.AbstractInputStreamContent
+import com.google.api.client.http.FileContent
 import com.google.api.services.drive.Drive
 import java.io.File
 import java.io.FileInputStream
@@ -11,38 +13,53 @@ import com.google.api.services.drive.model.File as GoogleFile
 enum class FileBackupType {
     BY_MODIFIED_DATE,
     BY_HASH,
-    BY_NAME_AND_HASH,
-    BY_NAME_AND_MODIFIED_DATE,
-    BY_NAME_AND_HASH_AND_MODIFIED_DATE
+    BY_HASH_AND_MODIFIED_DATE
+}
+
+enum class FileUpdateDirectionType {
+    LOCAL_TO_GOOGLE,
+    GOOGLE_TO_LOCAL,
+    BOTH,
+    NONE
 }
 
 fun FileBackup(dataClass: DataClass,
                googleDriveService: Drive,
                backupFolder: String,
-               googleDriveFolder: String = "") = FileBackup(dataClass,
-                                                            googleDriveService,
-                                                            File(backupFolder),
-                                                            googleDriveFolder)
+               googleDriveFolder: String = "",
+               ignoringFileList: MutableList<String> = mutableListOf(),
+               backupType: FileBackupType = FileBackupType.BY_MODIFIED_DATE,
+               fileUpdateDirectionType: FileUpdateDirectionType = FileUpdateDirectionType.LOCAL_TO_GOOGLE
+) = FileBackup(dataClass,
+    googleDriveService,
+    File(backupFolder),
+    googleDriveFolder,
+    ignoringFileList,
+    backupType,
+    fileUpdateDirectionType)
 
 
 class FileBackup (val dataClass: DataClass,
                   val googleDriveService: Drive,
                   val localBackupFolder: File,
                   val googleDriveFolder: String = "",
-                  val backupType: FileBackupType = FileBackupType.BY_MODIFIED_DATE){
+                  val ignoringFileList: MutableList<String> = mutableListOf(),
+                  val backupType: FileBackupType = FileBackupType.BY_MODIFIED_DATE,
+                  val updateDirectionType: FileUpdateDirectionType = FileUpdateDirectionType.LOCAL_TO_GOOGLE) {
 
     private val threadMap: MutableMap<Long, Thread> = mutableMapOf()
     private val threadMapLock: Object = Object()
     private val activeThreadsMap: MutableMap<Long, Thread> = mutableMapOf()
     private val activeThreadsMapLock: Object = Object()
 
-    val maximalRunningThreads: Int = 8
+    val maximalRunningThreads: Int = 5000
     private var currentActionsGoogle = 0
     private val currentActionsGoogleLock: Object = Object()
 
     private var currentActionsLocal = 0
     private val currentActionsLocalLock: Object = Object()
-/*
+
+    /*
     fun startRoutine(timeBetweenBackups: Long = 1000 * 60 * 60 * 24 * 7) {
 
         val backupThread = Thread {
@@ -107,7 +124,8 @@ class FileBackup (val dataClass: DataClass,
     }
 
 
- */
+    */
+
     fun firstPreparation(){
         if(!localBackupFolder.exists()){
             localBackupFolder.mkdirs()
@@ -129,9 +147,9 @@ class FileBackup (val dataClass: DataClass,
             dataClass.backupFolderMap[localBackupFolder.absolutePath] = backupDataClass
         }
 
-        val rootFileDataClass = FileDataClass(
+        val googleRootFileDataClass = FileDataClass(
             "",
-            "",
+            googleDriveFolder,
             "",
             "application/vnd.google-apps.folder",
             0L,
@@ -142,7 +160,9 @@ class FileBackup (val dataClass: DataClass,
             true,
             mutableListOf()
         )
-        backupDataClass.googleFileDataClass = rootFileDataClass
+
+        backupDataClass.localFileDataClass = convertSrcFileToFileDataClass(localBackupFolder)
+        backupDataClass.googleFileDataClass = googleRootFileDataClass
 
         println("----- Start Loading Google Drive Files Data -----")
         println("Start Date: " + Date())
@@ -153,8 +173,8 @@ class FileBackup (val dataClass: DataClass,
         println("----- Finished loading root folder-----")
         println("----- Start Loading File Data -----")
 
-        loadGoogleFolderDataInClass(googleFileList, rootFileDataClass)
-        loadLocalFolderDataInClass(localBackupFileList, rootFileDataClass)
+        loadGoogleFolderDataInClass(googleFileList, backupDataClass.googleFileDataClass)
+        loadLocalFolderDataInClass(localBackupFileList, backupDataClass.localFileDataClass)
         var finished = false
 
         var lastLineOutput = System.currentTimeMillis()
@@ -168,14 +188,18 @@ class FileBackup (val dataClass: DataClass,
                         activeThreadsMap[thread!!.id] = thread
                         thread.start()
                     }
-
-                    if (currentActionsGoogle <= 0)
-                        finished = true
+                    synchronized(currentActionsGoogleLock) {
+                        synchronized(currentActionsLocalLock) {
+                            if (currentActionsGoogle <= 0 && currentActionsLocal <= 0) {
+                                finished = true
+                            }
+                        }
+                    }
                 }
             }
             if( System.currentTimeMillis() - lastLineOutput > 1000){
                 synchronized(currentActionsGoogleLock) {
-                    println("Current Actions: $currentActionsGoogle")
+                    println("Current Actions: ${currentActionsGoogle + currentActionsLocal}")
                 }
                 lastLineOutput = System.currentTimeMillis()
             }
@@ -189,19 +213,105 @@ class FileBackup (val dataClass: DataClass,
         val milliseconds = (timeUntilCompleted % 1000L).toInt()
         println("Finished in: $minutes Minutes " +
                 "${seconds}.${milliseconds} Seconds")
-        saveDataClass(dataClass)
-    println("----- Start to Compare Files  -----")
+        //saveDataClass(dataClass)
+        println("----- Start to Compare Files  -----")
 
-    val missingFiles = compairFiles(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
 
-    println("----- Finished to Compare Files  -----")
-    for (file in missingFiles) {
-        println("Missing File: " + file.name)
+
+        println("----- Finished to Compare Files  -----")
+
+        //updateFiles(backupDataClass) // TODO
+        println()
     }
 
-    println()
+
+
+    fun updateFiles(backupDataClass: BackUpDataClass){
+        if (updateDirectionType == FileUpdateDirectionType.LOCAL_TO_GOOGLE) {
+            updateLocalToGoogle(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
+        } else if (updateDirectionType == FileUpdateDirectionType.GOOGLE_TO_LOCAL) {
+            updateGoogleToLocal(backupDataClass.googleFileDataClass, backupDataClass.localFileDataClass)
+        } else if (updateDirectionType == FileUpdateDirectionType.BOTH) {
+            updateLocalToGoogle(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
+            updateGoogleToLocal(backupDataClass.googleFileDataClass, backupDataClass.localFileDataClass)
+        }
+
 
     }
+
+    private fun updateGoogleToLocal(googleFileDataClass: FileDataClass, localFileDataClass: FileDataClass) {
+
+    }
+
+    private fun updateLocalToGoogle(localFileDataClass: FileDataClass, googleFileDataClass: FileDataClass) {
+        val missingGoogleFiles = compairFiles(localFileDataClass, googleFileDataClass)
+
+        for(missingFile in missingGoogleFiles){
+            if(missingFile.fileStatusType == FileStatusType.GOOGLE_NEWER ||
+                missingFile.fileStatusType == FileStatusType.GOOGLE_NEW ||
+                missingFile.fileStatusType == FileStatusType.EQUAL)
+                continue
+            if(missingFile.fileStatusType == FileStatusType.NONE &&
+                !missingFile.isFolder
+            ){
+                println("ERROR - Missing File: ${missingFile.name}")
+                continue
+            }
+
+
+            if(missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEW){
+                val googleFolder = createGoogleFolder(missingFile.name, googleFileDataClass.parentId)
+                if (googleFolder == null) {
+                    println("Error creating Google Folder: ${missingFile.name}")
+                    continue
+                }
+                val newGoogleFileDataClass = convertGoogleFileToFileDataClass(googleFolder)
+                googleFileDataClass.fileList.add(newGoogleFileDataClass)
+                updateLocalToGoogle(missingFile, newGoogleFileDataClass)
+            } else if(missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEWER){
+                // TODO: Upload the folder or just the files in it
+            } else if (!missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEWER){
+                val googleFile = googleFileDataClass.fileList.find { it.name == missingFile.name }
+                if(googleFile == null){
+                    println("Error finding Google File: ${missingFile.name}")
+                    continue
+                }
+                updateGoogleFile(googleFile, missingFile)
+                // TODO: Update file
+            } else if (!missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEW){
+                // TODO: Upload file
+            }
+
+
+            println("ERROR - Missing File: ${missingFile.name}")
+        }
+
+    }
+
+
+    fun createGoogleFolder(name: String, parentFolder: String): GoogleFile? {
+        val googleFile = GoogleFile()
+        googleFile.name = name
+        googleFile.parents = mutableListOf(parentFolder)
+        googleFile.mimeType = "application/vnd.google-apps.folder"
+
+        return googleDriveService.files().create(googleFile).execute()
+
+    }
+
+    fun updateGoogleFile(localDataClass: FileDataClass, googleDataClass: FileDataClass): GoogleFile? {
+        return updateGoogleFile(localDataClass, googleDataClass.id)
+    }
+    fun updateGoogleFile(localDataClass: FileDataClass, googleFileId: String): GoogleFile? {
+
+        val fileContent = FileContent(localDataClass.mimeType,
+            File(localDataClass.parentId + "/" + localDataClass.name))
+        val googleFile = googleDriveService.files().get(googleFileId).execute()
+
+        return googleDriveService.files().update(googleFile.id, googleFile, fileContent).execute()
+
+    } // TODO: Testing
+
     fun loadLocalFolderDataInClass(srcLocalFileList: MutableList<File>,
                                     srcFileDataClass: FileDataClass) {
         synchronized(currentActionsLocalLock) {
@@ -263,132 +373,6 @@ class FileBackup (val dataClass: DataClass,
         }
     }
 
-
-/*
-
-    fun firstPreparation(){
-        val googleFileList: MutableList<GoogleFile> = mutableListOf()
-        var pageToken: String? = null
-        var pageInt = 0
-        println("----- Start Loading Google Drive Files Data -----")
-        println("Start Date: " + Date())
-        val startTime = System.currentTimeMillis()
-        var pageStartTime = System.currentTimeMillis()
-        do {
-            val execute = googleDriveService
-                .files()
-                .list()
-                .setPageSize(1000)
-                .setPageToken(pageToken)
-                .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents)")
-                .execute()
-            //mimeType = application/vnd.google-apps.folder
-            googleFileList.addAll(execute.files)
-            pageToken = execute.nextPageToken
-            pageInt++
-            val duration = System.currentTimeMillis() - pageStartTime
-            val minutes = ((duration / 1000L) / 60L).toInt()
-            val seconds = ((duration / 1000L) % 60L).toInt()
-            val milliseconds = (duration % 1000L).toInt()
-            println("Page $pageInt : $minutes Minutes " +
-                    "${seconds}.${milliseconds} Seconds")
-            pageStartTime = System.currentTimeMillis()
-        } while (pageToken != null)
-        val timeUntilCompleted = System.currentTimeMillis() - startTime
-        println("----- Finished Loading Google Drive Files Data -----")
-        val minutes = (timeUntilCompleted / (1000L * 60L)).toInt()
-        val seconds = ((timeUntilCompleted / 1000L) % 60L).toInt()
-        val milliseconds = (timeUntilCompleted % 1000L).toInt()
-        println("Finished in: $minutes Minutes " +
-                "${seconds}.${milliseconds} Seconds")
-
-        println("End Date: " + Date())
-
-        println("----- Start Sorting GoogleFiles -----")
-        var backupClass = dataClass.backupFolderMap.get(googleDriveFolder)
-        if(backupClass == null){
-            backupClass = BackUpDataClass(backupFolder.absolutePath, googleDriveFolder)
-            dataClass.backupFolderMap.put(googleDriveFolder, backupClass)
-        }
-        val fileList: MutableList<FileDataClass> = mutableListOf()
-        for (googleFile in googleFileList){
-
-            fileList.add(
-                FileDataClass(googleFile.name ?: "",
-                        googleFile.id ?: "",
-                        "",
-                        googleFile.mimeType ?: "",
-                        googleFile.modifiedTime.value ?: 0L,
-                        googleFile.createdTime.value ?: 0L,
-                        googleFile.originalFilename ?: "",
-                        googleFile.fileExtension ?: "",
-                        googleFile.md5Checksum ?: "",
-                    googleFile.mimeType == "application/vnd.google-apps.folder",
-                        googleFile.parents ?: mutableListOf()
-                )
-            )
-        }
-        backupClass.googleFileDataClass = FileDataClass(fileList = fileList)
-        val baseGoogleFolder = sortGoogleFiles(backupClass.googleFileDataClass.fileList)
-        backupClass.googleFileDataClass = baseGoogleFolder
-        saveDataClass(dataClass)
-
-        println("----- End Sorting GoogleFiles -----")
-        println()
-    }
-
-    fun sortGoogleFiles(googleFileList: MutableList<FileDataClass>) : FileDataClass{
-        val sortedGoogleFileList = mutableListOf<FileDataClass>()
-        val folderList = mutableListOf<FileDataClass>()
-        val fileList = mutableListOf<FileDataClass>()
-        for(googleFile in googleFileList){
-            if(googleFile.mimeType == "application/vnd.google-apps.folder"){
-                folderList.add(googleFile)
-            } else {
-                fileList.add(googleFile)
-            }
-        }
-        for(folder in folderList){
-            sortedGoogleFileList.add(folder)
-            for(file in fileList){
-                if(file.parents.contains(folder.id)){
-                    sortedGoogleFileList.add(file)
-                }
-            }
-        }
-        folderList.clear()
-        folderList.addAll(sortedGoogleFileList)
-        sortedGoogleFileList.clear()
-
-        for(googleFile in fileList){
-            val googleFolder = folderList.find { it.id == googleFile.parents[0] }
-            if(googleFolder != null){
-                googleFolder.fileList.add(googleFile)
-            } else {
-                folderList.add(googleFile)
-            }
-        }
-
-        //sortedGoogleFileList.addAll(folderList)
-        //sortedGoogleFileList.addAll(fileList)
-        //dataClass.googleFiles = sortedGoogleFileList
-        //saveDataClass(dataClass)
-        return googleFolderSorter(folderList)
-    }
-    fun googleFolderSorter(googleFolderList: MutableList<FileDataClass>): FileDataClass{
-        while (googleFolderList.size > 1){
-            val folder = googleFolderList.removeAt(0)
-            val folderParent = googleFolderList.find { it.id == folder.parents[0] }
-            if(folderParent != null){
-                folderParent.fileList.add(folder)
-            } else {
-                googleFolderList.add(folder)
-            }
-        }
-        return googleFolderList[0]
-    }
-*/
-
     fun getGoogleDriveFileList(parent: String): MutableList<GoogleFile> {
         val googleFileList: MutableList<GoogleFile> = mutableListOf()
         var pageToken: String? = null
@@ -438,7 +422,7 @@ class FileBackup (val dataClass: DataClass,
              0L,
             file.absolutePath ?: "",
             file.extension ?: "",
-            if (file.isDirectory) "" else getMd5Checksum(file), //TODO  too slow
+            "", // TODO adding later
             file.isDirectory
         )
     }
@@ -450,12 +434,15 @@ class FileBackup (val dataClass: DataClass,
         if(directionLocalToGoogle) {
             val missingFiles : MutableList<FileDataClass> = mutableListOf()
             for (localFile in localFileDataClass.fileList) {
+                if(ignoringFileList.contains(localFile.name)){
+                    continue
+                }
                 val googleFile = googleDriveFileDataClass.fileList.find { it.name == localFile.name }
                 if (googleFile == null) {
                     val dataClass = FileDataClass(
                         localFile.name,
                         localFile.id,
-                        googleDriveFileDataClass.parentId,
+                        googleDriveFileDataClass.id,
                         localFile.mimeType,
                         localFile.lastModified,
                         localFile.createdTime,
@@ -463,8 +450,10 @@ class FileBackup (val dataClass: DataClass,
                         localFile.fileExtension,
                         localFile.md5Checksum,
                         localFile.isFolder,
-                        localFile.parents
+                        localFile.parents,
+                        FileStatusType.LOCAL_NEW
                     )
+                    localFile.fileStatusType = FileStatusType.LOCAL_NEW
                     missingFiles.add(dataClass)
                 } else if (localFile.isFolder) {
                     val compareFiles = compairFiles(localFile, googleFile, directionLocalToGoogle)
@@ -484,6 +473,9 @@ class FileBackup (val dataClass: DataClass,
 
         val missingFiles : MutableList<FileDataClass> = mutableListOf()
         for (googleFile in googleDriveFileDataClass.fileList) {
+            if(ignoringFileList.contains(googleFile.name)){
+                continue
+            }
             val localFile = localFileDataClass.fileList.find { it.name == googleFile.name }
             if (localFile == null) {
                 val dataClass = FileDataClass(
@@ -497,8 +489,10 @@ class FileBackup (val dataClass: DataClass,
                     googleFile.fileExtension,
                     googleFile.md5Checksum,
                     googleFile.isFolder,
-                    googleFile.parents
+                    googleFile.parents,
+                    FileStatusType.GOOGLE_NEW
                 )
+                googleFile.fileStatusType = FileStatusType.GOOGLE_NEW
                 missingFiles.add(dataClass)
             } else if (localFile.isFolder) {
                 val compairFiles = compairFiles(googleFile, localFile, directionLocalToGoogle)
@@ -542,32 +536,49 @@ class FileBackup (val dataClass: DataClass,
     fun isNeedBackup(driveFile: FileDataClass,
                      localFile: FileDataClass): Boolean{
 
-        when(backupType){
+        return when(backupType){
             FileBackupType.BY_HASH -> {
-                return driveFile.md5Checksum != localFile.md5Checksum
-            }
+                driveFile.md5Checksum != localFile.md5Checksum
+            } // TODO: To slow to compare by hash
             FileBackupType.BY_MODIFIED_DATE -> {
-                return driveFile.lastModified != localFile.lastModified
+                return if (driveFile.lastModified < localFile.lastModified) {
+                    driveFile.fileStatusType = FileStatusType.GOOGLE_NEWER
+                    localFile.fileStatusType = FileStatusType.GOOGLE_NEWER
+                    true
+                } else if(driveFile.lastModified > localFile.lastModified) {
+                    driveFile.fileStatusType = FileStatusType.LOCAL_NEWER
+                    localFile.fileStatusType = FileStatusType.LOCAL_NEWER
+                    true
+                } else {
+                    driveFile.fileStatusType = FileStatusType.EQUAL
+                    localFile.fileStatusType = FileStatusType.EQUAL
+                    false
+                }
             }
-            FileBackupType.BY_NAME_AND_MODIFIED_DATE -> {
-                return driveFile.name != localFile.name ||
+            FileBackupType.BY_HASH_AND_MODIFIED_DATE -> {
+                if (driveFile.lastModified < localFile.lastModified) {
+
+                    driveFile.fileStatusType = FileStatusType.GOOGLE_NEWER
+                    localFile.fileStatusType = FileStatusType.GOOGLE_NEWER
+
+                } else if(driveFile.lastModified > localFile.lastModified) {
+
+                    driveFile.fileStatusType = FileStatusType.LOCAL_NEWER
+                    localFile.fileStatusType = FileStatusType.LOCAL_NEWER
+
+                } else {
+
+                    driveFile.fileStatusType = FileStatusType.EQUAL
+                    localFile.fileStatusType = FileStatusType.EQUAL
+
+                }
+
+                driveFile.md5Checksum != localFile.md5Checksum ||
                         driveFile.lastModified != localFile.lastModified
-            }
-            FileBackupType.BY_NAME_AND_HASH_AND_MODIFIED_DATE -> {
-                return driveFile.name != localFile.name ||
-                        driveFile.md5Checksum != localFile.md5Checksum ||
-                        driveFile.lastModified != localFile.lastModified
-            }
-            FileBackupType.BY_NAME_AND_HASH -> {
-                return driveFile.name != localFile.name ||
-                        driveFile.md5Checksum != localFile.md5Checksum
-            }
+            } // TODO: To slow to compare by hash
 
         }
     }
-
-
-
 
     fun sleepUntil(date: Date){
         sleepUntil(date.time)
