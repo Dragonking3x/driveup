@@ -70,12 +70,21 @@ fun main(args: Array<String>) {
     ignoringFileList.add(".tmp.driveupload")
     ignoringFileList.add("System Volume Information")
 
-    println()
-    val fileBackup = FileBackup(dataClass, googleDriveService, localFolderPath, googleDriveFolder, ignoringFileList = ignoringFileList)
 
+
+    println()
+    val fileBackup = FileBackup(dataClass,
+        googleDriveService,
+        localFolderPath,
+        googleDriveFolder,
+        ignoringFileList = ignoringFileList,
+        fileUpdateDirectionType = FileUpdateDirectionType.BOTH)
+    //val findGoogleFolder = fileBackup.findGoogleFolder("manu", googleDriveFolder)
+    fileBackup.firstPreparation()
     //fileBackup.firstPreparation()
     // 1 minute
     //fileBackup.startRoutine(60000, FileBackupType.BY_MODIFIED_DATE)
+    println()
 
 
 }
