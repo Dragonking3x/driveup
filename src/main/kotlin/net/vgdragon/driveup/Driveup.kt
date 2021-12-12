@@ -39,8 +39,9 @@ fun main(args: Array<String>) {
         googleDriveService,
         localFolderPath,
         googleDriveFolder,
-        ignoringFileList = ignoringFileList,
-        fileUpdateDirectionType = FileUpdateDirectionType.BOTH)
+        ignoringFileList,
+        FileBackupType.BY_MODIFIED_DATE,
+        FileUpdateDirectionType.BOTH)
 
 
     fileBackup.firstPreparation()
