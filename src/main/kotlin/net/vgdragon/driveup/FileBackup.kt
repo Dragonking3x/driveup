@@ -3,8 +3,7 @@ package net.vgdragon.driveup
 import com.google.api.client.http.FileContent
 import com.google.api.client.util.DateTime
 import com.google.api.services.drive.Drive
-import java.io.File
-import java.io.FileInputStream
+import java.io.*
 import java.security.MessageDigest
 import java.util.*
 import com.google.api.services.drive.model.File as GoogleFile
@@ -47,6 +46,7 @@ class FileBackup (val dataClass: DataClass,
                   val backupType: FileBackupType = FileBackupType.BY_MODIFIED_DATE,
                   val updateDirectionType: FileUpdateDirectionType = FileUpdateDirectionType.LOCAL_TO_GOOGLE) {
 
+    private val googleDriveServiceLock: Object = Object()
     private val tempFileEnding: String = ".olddriveup"
 
     val maximalRunningPreparingThreads: Int = 5000
@@ -55,6 +55,8 @@ class FileBackup (val dataClass: DataClass,
     private val preparingThreadMapLock: Object = Object()
     private val activePreparingThreadsMap: MutableMap<Long, Thread> = mutableMapOf()
     private val activePreparingThreadsMapLock: Object = Object()
+
+    val maximalRunningCreateFolderThreads: Int = 100
 
     val maximalRunningUploadThreads: Int = 5
 
@@ -67,7 +69,7 @@ class FileBackup (val dataClass: DataClass,
 
     private val downloadThreadMap: MutableMap<Long, Thread> = mutableMapOf()
     private val downloadThreadMapLock: Object = Object()
-    private val activeDownloadThreadMapMap: MutableMap<Long, Thread> = mutableMapOf()
+    private val activeDownloadThreadMap: MutableMap<Long, Thread> = mutableMapOf()
     private val activeDownloadThreadMapLock: Object = Object()
 
     private var currentActionsGoogle = 0
@@ -79,72 +81,17 @@ class FileBackup (val dataClass: DataClass,
     private var currentActionsPreparing = 0
     private val currentActionsPreparingLock: Object = Object()
 
-    /*
-    fun startRoutine(timeBetweenBackups: Long = 1000 * 60 * 60 * 24 * 7) {
+    val errorList : MutableList<String> = mutableListOf()
+    val errorListLock: Object = Object()
 
-        val backupThread = Thread {
-            var lastBackup: Long = Long.MAX_VALUE
-            while (true) {
-                for (backupData in this.dataClass.backupFolderMap.values){
-                    var saveData = false
-                    if (backupData.lastBackup + timeBetweenBackups < System.currentTimeMillis()){
-                        backupFiles(localBackupFolder, googleDriveFolder, backupData.lastBackup)
-                        backupData.lastBackup = System.currentTimeMillis()
-                        saveData = true
-                    }
-                    if(backupData.lastBackup < lastBackup){
-                        lastBackup = backupData.lastBackup
-                    }
-                    if(saveData){
-                        saveDataClass(dataClass)
-                    }
-                }
-                sleepUntil(lastBackup + timeBetweenBackups)
-            }
-        }
-        backupThread.start()
-    }
+    var lastUpdate: Long = 0L
 
-    fun backupFiles(backupFolder: File,
-                    googleDriveFolder: String,
-                    lastBackup: Long = 0){
-        if (backupFolder.listFiles() == null) {
-            return
-        }
-        val fileList = if (backupFolder.listFiles() == null) {
-            return
-        } else {
-            backupFolder.listFiles()
-        }
-        for (file in fileList){
-            deepSearchBackup(file, googleDriveFolder, lastBackup)
+    fun startRoutine(timeBetweenUpdates: Long = 1000, backupTypeForRoutine: FileBackupType = backupType) {
+        while (true) {
+            Thread.sleep(timeBetweenUpdates)
+            //update()
         }
     }
-
-    fun deepSearchBackup(backupFolder: File,
-                         googleDriveFolder: String,
-                         lastBackup: Long = 0){
-        val fileList = if (backupFolder.listFiles() == null) {
-            return
-        } else {
-            backupFolder.listFiles()
-        }
-        for (file in fileList) {
-            if (file.isDirectory) {
-                deepSearchBackup(file, googleDriveFolder + file.name + "/", lastBackup)
-            } else {
-                val driveFile = googleDriveService.files().get(googleDriveFolder + file.name).execute()
-
-                if (isNeedBackup(driveFile, file, backupType)) {
-                    googleDriveService.files().update(driveFile.id, null).execute()
-                }
-            }
-
-        }
-    }
-
-
-    */
 
     fun firstPreparation(){
         if(!localBackupFolder.exists()){
@@ -154,9 +101,10 @@ class FileBackup (val dataClass: DataClass,
             println("Local Backup Folder is not a directory")
             return
         }
-        val localBackupFileList = if(localBackupFolder.listFiles().isNullOrEmpty()){
+        lastUpdate = System.currentTimeMillis()
+        val localBackupFileList: MutableList<File> = if(localBackupFolder.listFiles().isNullOrEmpty()){
             println("Local Backup Folder is empty")
-            return
+            mutableListOf()
         } else {
             localBackupFolder.listFiles()!!.toMutableList()
         }
@@ -193,9 +141,26 @@ class FileBackup (val dataClass: DataClass,
         println("----- Finished loading root folder-----")
         println("----- Start Loading File Data -----")
 
+
+        synchronized(currentActionsLocalLock) {
+            currentActionsLocal++
+        }
+        val thread = Thread {
+            loadLocalFolderDataInClass(localBackupFileList, backupDataClass.localFileDataClass)
+            synchronized(activePreparingThreadsMapLock) {
+                activePreparingThreadsMap.remove(Thread.currentThread().id)
+            }
+            synchronized(currentActionsLocalLock) {
+                currentActionsLocal--
+            }
+        }
+        synchronized(preparingThreadMapLock) {
+            preparingThreadMap.put(thread.id, thread)
+        }
         loadGoogleFolderDataInClass(googleFileList, backupDataClass.googleFileDataClass)
-        loadLocalFolderDataInClass(localBackupFileList, backupDataClass.localFileDataClass)
+
         threadListRegulationPreperation()
+
         val timeUntilCompleted = System.currentTimeMillis() - startTime
 
         println("----- Finished Loading File Data  -----")
@@ -211,6 +176,9 @@ class FileBackup (val dataClass: DataClass,
         threadListRegulationDownloadAndUpload()
 
         println("----- Finished Files  -----")
+        errorList.forEach {
+            println(it)
+        }
         println()
     }
 
@@ -240,7 +208,11 @@ class FileBackup (val dataClass: DataClass,
             if( System.currentTimeMillis() - lastLineOutput > 1000){
                 synchronized(currentActionsGoogleLock) {
                     synchronized(currentActionsLocalLock) {
-                        println("Current Actions: Local $currentActionsLocal Google $currentActionsGoogle (${currentActionsGoogle + currentActionsLocal})")
+                        printLnWithProperSpacing("Status",
+                            "Actions",
+                            "Current",
+                            0L,
+                            "Local $currentActionsLocal Google $currentActionsGoogle (${currentActionsGoogle + currentActionsLocal})")
                     }
                 }
                 lastLineOutput = System.currentTimeMillis()
@@ -255,10 +227,10 @@ class FileBackup (val dataClass: DataClass,
         while (!finished) {
             synchronized(downloadThreadMapLock) {
                 synchronized(activeDownloadThreadMapLock) {
-                    if(activeDownloadThreadMapMap.size < maximalRunningDownloadThreads && downloadThreadMap.isNotEmpty()) {
+                    if(activeDownloadThreadMap.size < maximalRunningDownloadThreads && downloadThreadMap.isNotEmpty()) {
                         val thread = downloadThreadMap.remove(downloadThreadMap.keys.first())
 
-                        activeDownloadThreadMapMap[thread!!.id] = thread
+                        activeDownloadThreadMap[thread!!.id] = thread
                         thread.start()
                     }
                 }
@@ -275,7 +247,7 @@ class FileBackup (val dataClass: DataClass,
             }
             synchronized(preparingThreadMapLock) {
                 synchronized(activePreparingThreadsMapLock) {
-                    if(activePreparingThreadsMap.size < maximalRunningPreparingThreads && preparingThreadMap.isNotEmpty()) {
+                    if(activePreparingThreadsMap.size < maximalRunningCreateFolderThreads && preparingThreadMap.isNotEmpty()) {
                         val thread = preparingThreadMap.remove(preparingThreadMap.keys.first())
 
                         activePreparingThreadsMap[thread!!.id] = thread
@@ -315,24 +287,29 @@ class FileBackup (val dataClass: DataClass,
     fun updateFiles(backupDataClass: BackUpDataClass){
         when (updateDirectionType) {
             FileUpdateDirectionType.LOCAL_TO_GOOGLE -> {
-                updateLocalToGoogle(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
+
+                val missingLocalFiles = comparingFiles(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
+                updateLocalToGoogle(missingLocalFiles, backupDataClass.googleFileDataClass)
             }
             FileUpdateDirectionType.GOOGLE_TO_LOCAL -> {
-                updateGoogleToLocal(backupDataClass.googleFileDataClass, backupDataClass.localFileDataClass)
+                val missingGoogleFiles = comparingFiles(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass, false)
+                updateGoogleToLocal(backupDataClass.localFileDataClass, missingGoogleFiles)
             }
             FileUpdateDirectionType.BOTH -> {
-                updateLocalToGoogle(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
-                updateGoogleToLocal(backupDataClass.googleFileDataClass, backupDataClass.localFileDataClass)
+                val missingLocalFiles = comparingFiles(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass)
+                updateLocalToGoogle(missingLocalFiles, backupDataClass.googleFileDataClass)
+
+                val missingGoogleFiles = comparingFiles(backupDataClass.localFileDataClass, backupDataClass.googleFileDataClass, false)
+                updateGoogleToLocal(backupDataClass.localFileDataClass, missingGoogleFiles)
             }
         }
 
 
     }
 
-    private fun updateGoogleToLocal(googleFileDataClass: FileDataClass, localFileDataClass: FileDataClass) {
-        val missingLocalFiles = comparingFiles(localFileDataClass, googleFileDataClass, false)
+    private fun updateGoogleToLocal(localFileDataClass: FileDataClass, googleFileDataClassList: MutableList<FileDataClass>) {
 
-        for(missingFile in missingLocalFiles){
+        for(missingFile in googleFileDataClassList){
             if(missingFile.fileStatusType == FileStatusType.LOCAL_NEWER ||
                 missingFile.fileStatusType == FileStatusType.LOCAL_NEW ||
                 missingFile.fileStatusType == FileStatusType.EQUAL)
@@ -340,85 +317,148 @@ class FileBackup (val dataClass: DataClass,
             if(missingFile.fileStatusType == FileStatusType.NONE &&
                 !missingFile.isFolder
             ){
-                println("ERROR - Missing File: ${missingFile.name}")
+
+
+                printLnWithProperSpacing(
+                    "ERROR",
+                    "UPDATE",
+                    "Missing File",
+                    0L,
+                    missingFile.name
+                )
                 continue
             }
 
-
-            if((missingFile.isFolder && missingFile.fileStatusType == FileStatusType.GOOGLE_NEW) ||
-                (missingFile.isFolder && missingFile.fileStatusType == FileStatusType.NONE)){
-                downloadFolderFromGoogle(missingFile, localFileDataClass)
+            if(missingFile.isFolder && missingFile.fileStatusType == FileStatusType.NONE){
+                val localFile = localFileDataClass.fileList.find { it.name == missingFile.name }
+                if(localFile == null){
+                    printLnWithProperSpacing(
+                        "ERROR",
+                        "UPDATE",
+                        "Missing Google File",
+                        0L,
+                        missingFile.name
+                    )
+                    continue
+                }
+                updateGoogleToLocal(localFile, missingFile.fileList)
+                continue
+            } else if(missingFile.isFolder && missingFile.fileStatusType == FileStatusType.GOOGLE_NEW){
+                downloadFolderFromGoogle(localFileDataClass, missingFile)
                 continue
             } else if(missingFile.isFolder && missingFile.fileStatusType == FileStatusType.GOOGLE_NEWER){
-                println("UPDATE - Folder: ${missingFile.name}")// TODO create update
-                downloadFolderFromGoogle(missingFile, localFileDataClass)
+
+                printLnWithProperSpacing("Starting",
+                    "UPDATE",
+                    "Folder",
+                    0L,
+                    missingFile.name)// TODO create update
+
+                downloadFolderFromGoogle(localFileDataClass, missingFile)
                 continue
             } else if (!missingFile.isFolder && missingFile.fileStatusType == FileStatusType.GOOGLE_NEWER){
-                val localFile = googleFileDataClass.fileList.find { it.name == missingFile.name }
-                if(localFile == null){
-                    println("Error finding Google File: ${missingFile.name}")
-                    continue
-                }
-                updateLocalFile(missingFile, localFile) // TODO
+                updateLocalFile(localFileDataClass, missingFile) // TODO
                 continue
             } else if (!missingFile.isFolder && missingFile.fileStatusType == FileStatusType.GOOGLE_NEW){
-                downloadFileFromGoogle(missingFile, localFileDataClass)
+                downloadFileFromGoogle(localFileDataClass, missingFile)
                 continue
             }
 
 
-            println("ERROR - Missing File: ${missingFile.name}")
+            printLnWithProperSpacing(
+                "ERROR",
+                "UPDATE",
+                "Missing File",
+                0L,
+                missingFile.name
+            )
         }
     }
-    private fun updateLocalToGoogle(localFileDataClass: FileDataClass, googleFileDataClass: FileDataClass) {
-        val missingGoogleFiles = comparingFiles(localFileDataClass, googleFileDataClass)
+    private fun updateLocalToGoogle(localFileDataClassList: MutableList<FileDataClass>, googleFileDataClass: FileDataClass) {
 
-        for(missingFile in missingGoogleFiles){
-            if(missingFile.fileStatusType == FileStatusType.GOOGLE_NEWER ||
-                missingFile.fileStatusType == FileStatusType.GOOGLE_NEW ||
-                missingFile.fileStatusType == FileStatusType.EQUAL)
+        for(localFile in localFileDataClassList){
+            if(localFile.fileStatusType == FileStatusType.GOOGLE_NEWER ||
+                localFile.fileStatusType == FileStatusType.GOOGLE_NEW ||
+                localFile.fileStatusType == FileStatusType.EQUAL)
                 continue
-            if(missingFile.fileStatusType == FileStatusType.NONE &&
-                !missingFile.isFolder
+            if(localFile.fileStatusType == FileStatusType.NONE &&
+                !localFile.isFolder
             ){
-                println("ERROR - Missing File: ${missingFile.name}")
+                printLnWithProperSpacing(
+                    "ERROR",
+                    "UPDATE",
+                    "Missing File",
+                    0L,
+                    localFile.name
+                )
                 continue
             }
-
-
-            if((missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEW) ||
-                (missingFile.isFolder && missingFile.fileStatusType == FileStatusType.NONE)){
-
-                println("UPLOAD - Google Folder: ${missingFile.name}")
-                uploadFolderToGoogle(missingFile, googleFileDataClass)
-                continue
-            } else if(missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEWER){
-                println("UPDATE - Folder: ${missingFile.name}")
-                uploadFolderToGoogle(missingFile, googleFileDataClass) // TODO create update
-                continue
-            } else if (!missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEWER){
-                continue
-                val googleFile = googleFileDataClass.fileList.find { it.name == missingFile.name }
+            if(localFile.isFolder && localFile.fileStatusType == FileStatusType.NONE){
+                val googleFile = googleFileDataClass.fileList.find { it.name == localFile.name }
                 if(googleFile == null){
-                    println("Error finding Google File: ${missingFile.name}")
+                    printLnWithProperSpacing(
+                        "ERROR",
+                        "UPDATE",
+                        "Missing File",
+                        0L,
+                        localFile.name
+                    )
                     continue
                 }
-                println("UPDATE - File to Google: ${missingFile.name}")
-                updateGoogleFile(missingFile, googleFile)// TODO delete and upload?
+                updateLocalToGoogle(localFile.fileList, googleFile)
+                continue
+            } else if(localFile.isFolder && localFile.fileStatusType == FileStatusType.LOCAL_NEW){
 
-            } else if (!missingFile.isFolder && missingFile.fileStatusType == FileStatusType.LOCAL_NEW){
-                uploadFileToGoogle(missingFile, googleFileDataClass)
+                printLnWithProperSpacing("Starting",
+                    "UPLOAD",
+                    "Google Folder",
+                    0L,
+                    localFile.originalFilename + "/" + localFile.name)
+                uploadFolderToGoogle(localFile, googleFileDataClass)
+                continue
+            } else if(localFile.isFolder && localFile.fileStatusType == FileStatusType.LOCAL_NEWER){
+                printLnWithProperSpacing("Starting",
+                    "UPDATE",
+                    "Folder",
+                    0L,
+                    localFile.name)
+                uploadFolderToGoogle(localFile, googleFileDataClass) // TODO create update
+                continue
+            } else if (!localFile.isFolder && localFile.fileStatusType == FileStatusType.LOCAL_NEWER){
+                val googleFile = googleFileDataClass.fileList.find { it.name == localFile.name }
+                if(googleFile == null){
+
+                    printLnWithProperSpacing(
+                        "Error",
+                        "Missing",
+                        "Google File",
+                        0L,
+                        localFile.name
+                    )
+                    continue
+                }
+                println("UPDATE - File to Google: ${localFile.name}")
+                updateGoogleFile(localFile, googleFile)// TODO delete and upload?
+                continue
+            } else if (!localFile.isFolder && localFile.fileStatusType == FileStatusType.LOCAL_NEW){
+                uploadFileToGoogle(localFile, googleFileDataClass)
                 continue
             }
 
 
-            println("ERROR - Missing File: ${missingFile.name}")
+            printLnWithProperSpacing(
+                "Error",
+                "Missing",
+                "File",
+                0L,
+                localFile.name
+            )
         }
 
     }
 
-    private fun updateLocalFile(missingFile: FileDataClass, localFile: FileDataClass) {
-        downloadFileFromGoogle(missingFile, localFile, true)
+    private fun updateLocalFile(localFile: FileDataClass, missingFile: FileDataClass) {
+        downloadFileFromGoogle(localFile, missingFile, true)
     }
     fun updateGoogleFile(localFileDataClass: FileDataClass, googleDataClass: FileDataClass): GoogleFile? {
 
@@ -426,9 +466,11 @@ class FileBackup (val dataClass: DataClass,
     }
     fun updateGoogleFile(localFileDataClass: FileDataClass, googleFileId: String): GoogleFile? {
 
-        val fileContent = FileContent(localFileDataClass.mimeType,
-            File(localFileDataClass.parentId + "/" + localFileDataClass.name))
+
         val googleFileTemp = googleDriveService.files().get(googleFileId).execute()
+        val fileContent = FileContent(googleFileTemp.mimeType,
+            File(localFileDataClass.parentId + "/" + localFileDataClass.name))
+
         val googleFile = GoogleFile()
         googleFile.name = localFileDataClass.name
         googleFile.parents = googleFileTemp.parents
@@ -445,138 +487,239 @@ class FileBackup (val dataClass: DataClass,
     } // TODO: Testing
 
 
-    private fun downloadFolderFromGoogle(missingFile: FileDataClass, localFileDataClass: FileDataClass) {
+    private fun downloadFolderFromGoogle(localFolderDataClass: FileDataClass, googleFolderDataClass: FileDataClass) {
 
-        synchronized(currentActionsPreparingLock) {
-            currentActionsPreparing++
-        }
-        val thread = Thread {
-
-            val newLocalFileDataClass = if (localFileDataClass.fileStatusType == FileStatusType.NONE) {
-                localFileDataClass
-            } else {
-                println("CREATING - Google Folder: ${localFileDataClass.originalFilename + missingFile.name}")
-                createLocalFolder(localFileDataClass.originalFilename, missingFile)
-            }
-            localFileDataClass.fileList.add(newLocalFileDataClass)
-            for (file in missingFile.fileList) {
-                if (file.isFolder) {
-                    downloadFolderFromGoogle(file, newLocalFileDataClass)
-                } else {
-                    downloadFileFromGoogle(file, newLocalFileDataClass)
-                }
-            }
-
-            synchronized(activePreparingThreadsMapLock) {
-                activePreparingThreadsMap.remove(Thread.currentThread().id)
-            }
-            synchronized(currentActionsPreparingLock) {
-                currentActionsPreparing--
-            }
-
-        }
-        synchronized(preparingThreadMapLock) {
-            preparingThreadMap.put(thread.id, thread)
-        }
-
-    }
-    private fun downloadFileFromGoogle(missingFile: FileDataClass, localFileDataClass: FileDataClass, update: Boolean = false) {
         synchronized(currentActionsGoogleLock) {
             currentActionsGoogle++
         }
         val thread = Thread {
-            val startTime = System.currentTimeMillis()
-
-            if(update){
-                println("Start - DOWNLOAD File (update): ${localFileDataClass.name}")
-                val file = File(localFileDataClass.originalFilename + "/" + missingFile.name)
-                val tempFile = File(
-                    localFileDataClass.originalFilename +
-                            "/" + missingFile.name + tempFileEnding
+            var newLocalFileDataClass = localFolderDataClass.fileList.find { it.name == googleFolderDataClass.name }
+            if(newLocalFileDataClass == null){
+                printLnWithProperSpacing("Action",
+                    "CREATING",
+                    "Local Folder",
+                    0L,
+                    googleFolderDataClass.originalFilename + "/" + localFolderDataClass.name
                 )
-                file.renameTo(tempFile)
-                tempFile.delete()
 
-                val timeUntilCompleted = System.currentTimeMillis() - startTime
-                val minutes = (timeUntilCompleted / (1000L * 60L)).toInt()
-                val seconds = ((timeUntilCompleted / 1000L) % 60L).toInt()
-                val milliseconds = (timeUntilCompleted % 1000L).toInt()
-                println("Finished - DOWNLOAD File (update) $minutes Minutes " +
-                        "${seconds}.${milliseconds} Seconds: ${localFileDataClass.name}")
-            } else {
-                println("Start - DOWNLOAD File: ${localFileDataClass.originalFilename + "/" + missingFile.name}")
-                googleDriveService.files()
-                    .get(missingFile.id)
-                    .executeAndDownloadTo(
-                        File(localFileDataClass.originalFilename + "/" + missingFile.name)
-                            .outputStream()
-                    )
-
-                val timeUntilCompleted = System.currentTimeMillis() - startTime
-                val minutes = (timeUntilCompleted / (1000L * 60L)).toInt()
-                val seconds = ((timeUntilCompleted / 1000L) % 60L).toInt()
-                val milliseconds = (timeUntilCompleted % 1000L).toInt()
-                println("Finished - DOWNLOAD File $minutes Minutes " +
-                        "${seconds}.${milliseconds} Seconds: ${localFileDataClass.originalFilename + "/" + missingFile.name}")
+                newLocalFileDataClass = createLocalFolder(localFolderDataClass.originalFilename + "/" + googleFolderDataClass.name, googleFolderDataClass)
             }
 
+            localFolderDataClass.fileList.add(newLocalFileDataClass)
+            for (googleFile in googleFolderDataClass.fileList) {
+                if (googleFile.isFolder) {
+                    downloadFolderFromGoogle(newLocalFileDataClass, googleFile)
+                } else {
+                    downloadFileFromGoogle(newLocalFileDataClass, googleFile)
+                }
+            }
 
-            synchronized(activePreparingThreadsMapLock){
-                activePreparingThreadsMap.remove(Thread.currentThread().id)
+            synchronized(activeDownloadThreadMapLock) {
+                activeDownloadThreadMap.remove(Thread.currentThread().id)
             }
             synchronized(currentActionsGoogleLock) {
                 currentActionsGoogle--
             }
 
         }
-        synchronized(preparingThreadMapLock) {
-            preparingThreadMap.put(thread.id, thread)
+        synchronized(downloadThreadMapLock) {
+            downloadThreadMap.put(thread.id, thread)
         }
-    }
-    private fun uploadFolderToGoogle(missingFile: FileDataClass, parentGoogleFile: FileDataClass) {
 
-        synchronized(currentActionsPreparingLock) {
-            currentActionsPreparing++
+    }
+    private fun downloadFileFromGoogle(localFolderFileDataClass: FileDataClass,
+                                       googleFileDataClass: FileDataClass,
+                                       update: Boolean = false) {
+        synchronized(currentActionsGoogleLock) {
+            currentActionsGoogle++
         }
         val thread = Thread {
-            println("CREATING - Google Folder: ${missingFile.originalFilename}")
+            val startTime = System.currentTimeMillis()
+            val localFile = File(localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+            val tempFile = File(
+                localFolderFileDataClass.originalFilename +
+                        "/" + googleFileDataClass.name + tempFileEnding
+            )
+            var error = false
+
+            if(googleFileDataClass.size <= 10L && update) {
+                printLnWithProperSpacing("Error",
+                    "UPDATE",
+                    "File too small",
+                    0L,
+                    localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+                synchronized(activeDownloadThreadMapLock){
+                    activeDownloadThreadMap.remove(Thread.currentThread().id)
+                }
+                synchronized(currentActionsGoogleLock) {
+                    currentActionsGoogle--
+                }
+                return@Thread
+
+            }
+            if (googleFileDataClass.size <= 10L){
+                printLnWithProperSpacing("Action",
+                    "CREATING",
+                    "File",
+                    0L,
+                    localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+                localFile.createNewFile()
+            } else {
+                if(update){
+                    localFile.renameTo(tempFile)
+                }
+
+                var trying = 0
+                while (true) {
+                    if (update){
+                        printLnWithProperSpacing("Starting",
+                            "DOWNLOAD",
+                            "File update",
+                            0L,
+                            localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+                    } else {
+                        printLnWithProperSpacing("Starting",
+                            "DOWNLOAD",
+                            "File",
+                            0L,
+                            localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+                    }
 
 
-            var googleFolderList = findGoogleFolder(missingFile.name, parentGoogleFile.id)
+                    try {
+                        googleDriveService.files()
+                            .get(googleFileDataClass.id)
+                            .executeMediaAndDownloadTo(localFile.outputStream()) // TODO Error while downloading java files
+                        break
+                    } catch (e: Exception) {
+                        printLnWithProperSpacing(
+                            "Error",
+                            "DOWNLOAD",
+                            "File",
+                            0L,
+                            localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name
+
+                        )
+                        val googleDriveController = GoogleDriveController().build()
+                        if (googleDriveController != null){
+                            googleDriveService = googleDriveController
+                        }
+                        localFile.delete()
+                        trying++
+                        if (trying > 3) {
+                            synchronized(errorListLock){
+                                errorList.add("Error downloading file: " + localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+                            }
+                            error = true
+                            break
+                        }
+                        Thread.sleep(1000L * Random().nextInt(1, 5))
+                    }
+
+                }
+
+            }
+
+            if(error && update){
+                tempFile.renameTo(localFile)
+            }
+            if(error){
+                synchronized(activeDownloadThreadMapLock){
+                    activeDownloadThreadMap.remove(Thread.currentThread().id)
+                }
+                synchronized(currentActionsGoogleLock) {
+                    currentActionsGoogle--
+                }
+                return@Thread
+            }
+
+            val timeUntilCompleted = System.currentTimeMillis() - startTime
+
+            if (update) {
+                tempFile.delete()
+                printLnWithProperSpacing("Finished",
+                    "DOWNLOAD",
+                    "File update",
+                    timeUntilCompleted,
+                    localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+            } else {
+                printLnWithProperSpacing("Finished",
+                    "DOWNLOAD",
+                    "File",
+                    timeUntilCompleted,
+                    localFolderFileDataClass.originalFilename + "/" + googleFileDataClass.name)
+            }
+
+            localFile.setLastModified(googleFileDataClass.lastModified)
+
+            if(update){
+                localFolderFileDataClass.fileList.find { it.name == localFolderFileDataClass.originalFilename }?.lastModified = googleFileDataClass.lastModified
+            } else {
+                localFolderFileDataClass.fileList.add(convertSrcFileToFileDataClass(localFile))
+            }
+
+
+            synchronized(activeDownloadThreadMapLock){
+                activeDownloadThreadMap.remove(Thread.currentThread().id)
+            }
+            synchronized(currentActionsGoogleLock) {
+                currentActionsGoogle--
+            }
+
+        }
+        synchronized(downloadThreadMapLock) {
+            downloadThreadMap.put(thread.id, thread)
+        }
+    }
+    private fun uploadFolderToGoogle(localFolderDataClass: FileDataClass, googleFolderDataClass: FileDataClass) {
+
+        synchronized(currentActionsLocalLock) {
+            currentActionsLocal++
+        }
+        val thread = Thread {
+
+
+            var googleFolderList = findGoogleFolder(localFolderDataClass.name, googleFolderDataClass.id)
             val googleFolder = if (googleFolderList.size == 0) {
-                createGoogleFolder(missingFile, parentGoogleFile.id)
+                printLnWithProperSpacing("Action", "CREATING", "Google Folder", 0L, localFolderDataClass.originalFilename)
+                createGoogleFolder(localFolderDataClass, googleFolderDataClass.id)
             } else if (googleFolderList.size == 1) {
                 googleFolderList[0]
             } else {
                 null
             }
             if (googleFolder == null) {
-                println("Error finding Google Folder: ${missingFile.name}")
+                printLnWithProperSpacing(
+                    "Error",
+                    "CREATING",
+                    "Google Folder",
+                    0L,
+                    localFolderDataClass.originalFilename
+                )
                 return@Thread
             }
 
 
             val newGoogleFileDataClass = convertGoogleFileToFileDataClass(googleFolder)
-            parentGoogleFile.fileList.add(newGoogleFileDataClass)
-            for (file in missingFile.fileList) {
-                if (file.isFolder) {
-                    println("CREATING - Google Folder: ${missingFile.originalFilename}")
-                    uploadFolderToGoogle(file, newGoogleFileDataClass)
+            googleFolderDataClass.fileList.add(newGoogleFileDataClass)
+            for (localFile in localFolderDataClass.fileList) {
+                if (localFile.isFolder) {
+                    uploadFolderToGoogle(localFile, newGoogleFileDataClass)
                 } else {
-                    uploadFileToGoogle(file, newGoogleFileDataClass)
+                    uploadFileToGoogle(localFile, newGoogleFileDataClass)
                 }
             }
 
-            synchronized(activePreparingThreadsMapLock) {
-                activePreparingThreadsMap.remove(Thread.currentThread().id)
+            synchronized(activeUploadThreadsMapLock) {
+                activeUploadThreadsMap.remove(Thread.currentThread().id)
             }
-            synchronized(currentActionsPreparingLock) {
-                currentActionsPreparing--
+            synchronized(currentActionsLocalLock) {
+                currentActionsLocal--
             }
 
         }
-        synchronized(preparingThreadMapLock) {
-            preparingThreadMap.put(thread.id, thread)
+        synchronized(uploadThreadMapLock) {
+            uploadThreadMap.put(thread.id, thread)
         }
     }
 
@@ -594,24 +737,35 @@ class FileBackup (val dataClass: DataClass,
         }
         val thread = Thread {
             val startTime = System.currentTimeMillis()
-
-            println("Start - UPLOAD File: ${localFileDataClass.name}")
+            printLnWithProperSpacing("Starting",
+                "UPLOAD",
+                "File",
+                0L,
+                localFileDataClass.originalFilename)
             val googleFile = createGoogleFile(localFileDataClass, googleFileDataClass.id)
+
             if(googleFile != null){
                 val newGoogleFileDataClass = convertGoogleFileToFileDataClass(googleFile)
 
                 googleFileDataClass.fileList.add(newGoogleFileDataClass)
 
+                val timeUntilCompleted = System.currentTimeMillis() - startTime
+                printLnWithProperSpacing("Finished",
+                    "UPLOAD",
+                    "File",
+                    timeUntilCompleted,
+                    localFileDataClass.originalFilename
+                )
+
             } else {
-                println("Error creating Google File: ${localFileDataClass.name}")
+                printLnWithProperSpacing("Error",
+                    "UPLOAD",
+                    "File",
+                    0L,
+                    localFileDataClass.originalFilename
+                )
             }
 
-            val timeUntilCompleted = System.currentTimeMillis() - startTime
-            val minutes = (timeUntilCompleted / (1000L * 60L)).toInt()
-            val seconds = ((timeUntilCompleted / 1000L) % 60L).toInt()
-            val milliseconds = (timeUntilCompleted % 1000L).toInt()
-            println("Finished - UPLOAD File:$minutes Minutes " +
-                    "${seconds}.${milliseconds} Seconds: ${localFileDataClass.name}")
 
             synchronized(activePreparingThreadsMapLock){
                 activePreparingThreadsMap.remove(Thread.currentThread().id)
@@ -638,7 +792,7 @@ class FileBackup (val dataClass: DataClass,
         return googleDriveService.files().create(googleFile).execute()
 
     }
-    private fun createGoogleFile(localFileDataClass: FileDataClass, parentId: String): GoogleFile {
+    private fun createGoogleFile(localFileDataClass: FileDataClass, parentId: String): com.google.api.services.drive.model.File? {
 
         val fileContent = FileContent(localFileDataClass.mimeType,
             File(localFileDataClass.parentId + "/" + localFileDataClass.name))
@@ -648,16 +802,28 @@ class FileBackup (val dataClass: DataClass,
         fileMetadata.createdTime = DateTime(localFileDataClass.createdTime)
         fileMetadata.modifiedTime = DateTime(localFileDataClass.lastModified)
 
-
+        var trying = 0
         while (true) {
             try {
-                val googleFile = googleDriveService.files().create(fileMetadata, fileContent).setFields("id").execute()
+                val googleFile =
+                    googleDriveService.files().create(fileMetadata, fileContent).setFields("id").execute()
                 return googleFile
             } catch (e: Exception) {
-                println("Error creating Google File: ${localFileDataClass.name}")
-
+                printLnWithProperSpacing("Error", "Creating", "Google File", 0L, localFileDataClass.name)
+                val googleDriveController = GoogleDriveController().build()
+                if (googleDriveController != null){
+                    googleDriveService = googleDriveController
+                }
+                trying++
+                if (trying > 3) {
+                    synchronized(errorListLock){
+                        errorList.add("Error downloading file: " + localFileDataClass.originalFilename + "/" + localFileDataClass.name)
+                    }
+                    return null
+                }
                 Thread.sleep(10000)
             } //TODO Find solution to an upload error
+
         }
     }
 
@@ -714,31 +880,19 @@ class FileBackup (val dataClass: DataClass,
 
     fun loadLocalFolderDataInClass(srcLocalFileList: MutableList<File>,
                                     srcFileDataClass: FileDataClass) {
-        synchronized(currentActionsLocalLock) {
-            currentActionsLocal++
-        }
-        val thread = Thread {
-            for (srcFile in srcLocalFileList) {
 
-                val fileDataClass = convertSrcFileToFileDataClass(srcFile)
-                srcFileDataClass.fileList.add(fileDataClass)
+        for (srcFile in srcLocalFileList) {
 
-                if (fileDataClass.isFolder) {
-                    val listFiles = srcFile.listFiles() ?: continue
-                    loadLocalFolderDataInClass(listFiles.toMutableList(), fileDataClass)
-                }
-            }
-            synchronized(activePreparingThreadsMapLock){
-                activePreparingThreadsMap.remove(Thread.currentThread().id)
-            }
-            synchronized(currentActionsLocalLock) {
-                currentActionsLocal--
-            }
+            val fileDataClass = convertSrcFileToFileDataClass(srcFile)
+            srcFileDataClass.fileList.add(fileDataClass)
 
+            if (fileDataClass.isFolder) {
+                val listFiles = srcFile.listFiles() ?: continue
+                loadLocalFolderDataInClass(listFiles.toMutableList(), fileDataClass)
+            }
         }
-        synchronized(preparingThreadMapLock) {
-            preparingThreadMap.put(thread.id, thread)
-        }
+
+
 
     }
     fun loadGoogleFolderDataInClass(srcGoogleFileList: MutableList<GoogleFile>,
@@ -783,7 +937,7 @@ class FileBackup (val dataClass: DataClass,
                 .setPageSize(1000)
                 .setPageToken(pageToken)
                 .setQ("parents='${parentId}' and trashed=false and name='${name}'")
-                .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents)")
+                .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents, size)")
                 .execute()
 
             googleFileList.addAll(execute.files)
@@ -803,7 +957,7 @@ class FileBackup (val dataClass: DataClass,
                 .setPageSize(1000)
                 .setPageToken(pageToken)
                 .setQ("parents='${parent}' and trashed=false")
-                .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents)")
+                .setFields("nextPageToken, files(id, name, mimeType, parents, modifiedTime, createdTime, originalFilename, fileExtension, md5Checksum, parents, size)")
                 .execute()
 
             googleFileList.addAll(execute.files)
@@ -814,7 +968,6 @@ class FileBackup (val dataClass: DataClass,
     }
 
     fun convertGoogleFileToFileDataClass(googleFile: GoogleFile): FileDataClass{
-
 
         return FileDataClass(googleFile.name ?: "",
             googleFile.id ?: "",
@@ -834,7 +987,8 @@ class FileBackup (val dataClass: DataClass,
             googleFile.fileExtension ?: "",
             googleFile.md5Checksum ?: "",
             googleFile.mimeType == "application/vnd.google-apps.folder",
-            googleFile.parents ?: mutableListOf()
+            googleFile.parents ?: mutableListOf(),
+            size = googleFile.getSize() ?: 0L
         )
     }
     fun convertSrcFileToFileDataClass(file: File): FileDataClass{
@@ -849,7 +1003,8 @@ class FileBackup (val dataClass: DataClass,
             file.absolutePath ?: "",
             file.extension ?: "",
             "", // TODO adding later
-            file.isDirectory
+            file.isDirectory,
+            size = file.length()
         )
     }
 
@@ -932,6 +1087,38 @@ class FileBackup (val dataClass: DataClass,
 
     }
 
+    fun printLnWithProperSpacing(starting: String,
+                                 function: String,
+                                 type: String,
+                                 time: Long,
+                                 output: String){
+        val startingStringSpace = 15
+        val functionStringSpace = 15
+        val typeStringSpace = 15
+        val timeStringSpace = 30
+
+        var startingString = starting
+        if(startingString.length < startingStringSpace){
+            startingString = startingString.padEnd(typeStringSpace)
+        }
+        var functionString = function
+        if(functionString.length < functionStringSpace){
+            functionString = functionString.padEnd(functionStringSpace)
+        }
+        var typeString = type
+        if(typeString.length < typeStringSpace){
+            typeString = typeString.padEnd(typeStringSpace)
+        }
+        var timeString = if(time != 0L){
+            val minutes = (time / (1000L * 60L)).toInt()
+            val seconds = ((time / 1000L) % 60L).toInt()
+            val milliseconds = (time % 1000L).toInt()
+            "Completed in: ${minutes}m ${seconds}s ${milliseconds}ms".padEnd(timeStringSpace)
+        } else {
+            "".padEnd(timeStringSpace)
+        }
+        println("$startingString $functionString $typeString $timeString: $output")
+    }
 
     fun sleepUntil(date: Date){
         sleepUntil(date.time)

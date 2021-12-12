@@ -7,12 +7,14 @@ import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeFlow
 import com.google.api.client.googleapis.auth.oauth2.GoogleClientSecrets
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport
 import com.google.api.client.googleapis.services.AbstractGoogleClientRequest
+import com.google.api.client.http.HttpRequest
 import com.google.api.client.http.HttpRequestInitializer
 import com.google.api.client.http.javanet.NetHttpTransport
 import com.google.api.client.json.JsonFactory
 import com.google.api.client.json.gson.GsonFactory
 import com.google.api.client.util.store.FileDataStoreFactory
 import com.google.api.services.drive.Drive
+import com.google.api.services.drive.DriveRequest
 import com.google.api.services.drive.DriveRequestInitializer
 import com.google.api.services.drive.DriveScopes
 import java.io.*
@@ -38,6 +40,7 @@ class GoogleDriveController {
 
     @Throws(IOException::class)
     private fun getCredentials(HTTP_TRANSPORT: NetHttpTransport): Credential? {
+
         val clientSecretFilePath = File(CREDENTIALS_FOLDER, CLIENT_SECRET_FILE_NAME)
         if (!clientSecretFilePath.exists()) {
             throw FileNotFoundException(
@@ -54,8 +57,10 @@ class GoogleDriveController {
         val flow = GoogleAuthorizationCodeFlow.Builder(
             HTTP_TRANSPORT, JSON_FACTORY,
             clientSecrets, SCOPES
-        ).setDataStoreFactory(FileDataStoreFactory(CREDENTIALS_FOLDER))
+        )
+            .setDataStoreFactory(FileDataStoreFactory(CREDENTIALS_FOLDER))
             .setAccessType("offline").build()
+
         return AuthorizationCodeInstalledApp(flow, LocalServerReceiver()).authorize("user")
     }
 
@@ -73,11 +78,11 @@ class GoogleDriveController {
         // 2: Build a new authorized API client service.
         val HTTP_TRANSPORT = GoogleNetHttpTransport.newTrustedTransport()
 
-        HTTP_TRANSPORT.createRequestFactory()
+
         // 3: Read client_secret.json file & create Credential object.
         val credential = getCredentials(HTTP_TRANSPORT)
 
-
+        credential!!.setExpiresInSeconds(6000 * 5)
         // 5: Create Google Drive Service.
         val build = Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, credential)
             .setApplicationName(APPLICATION_NAME)

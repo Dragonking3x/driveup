@@ -34,7 +34,9 @@ class FileDataClass(var name: String = "",
                     var isFolder: Boolean = true,
                     var parents: MutableList<String> = mutableListOf(),
                     var fileStatusType: FileStatusType = FileStatusType.NONE,
-                    var fileList: MutableList<FileDataClass> = mutableListOf()){
+                    var fileList: MutableList<FileDataClass> = mutableListOf(),
+                    var size : Long = 0
+){
 
     fun copyWithoutList(): FileDataClass {
         return FileDataClass(name,
@@ -49,7 +51,8 @@ class FileDataClass(var name: String = "",
             isFolder,
             parents,
             fileStatusType,
-            mutableListOf()
+            mutableListOf(),
+            size
         )
     }
 }
